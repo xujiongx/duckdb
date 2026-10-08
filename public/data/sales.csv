@@ -1,0 +1,16 @@
+order_id,customer,product,category,quantity,price,order_date
+1,Alice,Laptop,Electronics,1,899.00,2024-01-15
+2,Bob,Mouse,Electronics,2,29.99,2024-01-16
+3,Alice,Notebook,Stationery,5,4.50,2024-01-17
+4,Charlie,Keyboard,Electronics,1,79.00,2024-01-18
+5,Bob,Pen,Stationery,10,1.20,2024-01-19
+6,Diana,Monitor,Electronics,1,299.00,2024-01-20
+7,Alice,USB Cable,Electronics,3,12.50,2024-02-01
+8,Charlie,Stapler,Stationery,2,8.99,2024-02-03
+9,Diana,Laptop,Electronics,1,899.00,2024-02-05
+10,Bob,Notebook,Stationery,3,4.50,2024-02-08
+11,Alice,Mouse,Electronics,1,29.99,2024-02-10
+12,Charlie,Monitor,Electronics,2,299.00,2024-02-12
+13,Diana,Pen,Stationery,20,1.20,2024-02-15
+14,Bob,Keyboard,Electronics,1,79.00,2024-02-18
+15,Alice,Stapler,Stationery,1,8.99,2024-02-20

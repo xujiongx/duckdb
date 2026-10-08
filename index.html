@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DuckDB-Wasm 数据分析</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Source+Sans+3:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="bg"></div>
+    <main class="shell">
+      <header class="hero">
+        <p class="brand">DuckDB-Wasm</p>
+        <h1>上传数据，本地即时分析</h1>
+        <p class="lede">
+          文件只在浏览器内处理。支持 Excel / CSV，并内置亚马逊搜索词运营分析。
+        </p>
+        <p class="status" id="status">正在准备 DuckDB-Wasm…</p>
+      </header>
+
+      <section class="upload-panel" id="upload-panel">
+        <label class="dropzone" id="dropzone" for="file-input">
+          <input
+            id="file-input"
+            type="file"
+            accept=".xlsx,.xls,.csv,.tsv,.parquet,.json,.jsonl,.ndjson,text/csv,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            hidden
+          />
+          <span class="dropzone-title">拖拽文件到这里，或点击选择</span>
+          <span class="dropzone-sub">Excel / CSV / TSV / Parquet / JSON · 亚马逊搜索词报告可直接分析</span>
+        </label>
+        <div class="upload-actions">
+          <button type="button" class="ghost-btn" id="sample-amazon-btn">
+            试用亚马逊搜索词报告
+          </button>
+          <button type="button" class="ghost-btn" id="sample-btn">试用示例销售数据</button>
+        </div>
+      </section>
+
+      <section class="workspace" id="workspace" hidden>
+        <div class="file-bar">
+          <div>
+            <p class="file-name" id="file-name">—</p>
+            <p class="file-meta" id="file-meta">—</p>
+          </div>
+          <div class="file-bar-actions">
+            <label class="sheet-picker" id="sheet-picker" hidden>
+              <span>工作表</span>
+              <select id="sheet-select"></select>
+            </label>
+            <button type="button" class="ghost-btn" id="reset-btn">重新上传</button>
+          </div>
+        </div>
+
+        <section class="stats" id="stats" aria-live="polite">
+          <div class="stat">
+            <span class="stat-label">行数</span>
+            <strong id="stat-rows">—</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">列数</span>
+            <strong id="stat-cols">—</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">表名</span>
+            <strong id="stat-table">data</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">格式</span>
+            <strong id="stat-format">—</strong>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="tabs" role="tablist">
+            <button class="tab is-active" data-view="preview" type="button">数据预览</button>
+            <button class="tab" data-view="schema" type="button">字段结构</button>
+            <button class="tab" data-view="amazon" type="button" id="tab-amazon" hidden>
+              亚马逊运营分析
+            </button>
+            <button class="tab" data-view="sql" type="button">SQL 分析</button>
+          </div>
+
+          <div class="view is-active" id="view-preview">
+            <p class="view-note" id="preview-note">支持全量数据分页浏览</p>
+            <div id="preview-result-mount" class="amazon-result-mount">
+              <p class="view-note">上传数据后在这里分页预览</p>
+            </div>
+          </div>
+
+          <div class="view" id="view-schema">
+            <div class="table-wrap">
+              <table>
+                <thead id="head-schema"></thead>
+                <tbody id="body-schema"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="view" id="view-amazon">
+            <p class="view-note" id="amazon-note">
+              识别到亚马逊搜索词报告后，可一键运行下方固定分析。日期会显示为「2026年09月01日（周一）」这类可读格式。
+            </p>
+            <div class="amazon-grid" id="amazon-grid"></div>
+            <p class="error" id="amazon-error" hidden></p>
+            <div class="amazon-result">
+              <div class="amazon-result-head">
+                <h2 id="amazon-result-title">分析结果</h2>
+                <p id="amazon-result-desc" class="view-note"></p>
+                <p class="column-chip-row" id="amazon-column-chips"></p>
+              </div>
+              <div id="amazon-result-mount" class="amazon-result-mount">
+                <p class="view-note">上传报告后这里会显示：客户搜索词、点击量、花费、订单、CPC、CVR、CPA</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="view" id="view-sql">
+            <form class="sql-form" id="sql-form">
+              <label for="sql-input">对表 <code>data</code> 编写只读 SQL</label>
+              <textarea id="sql-input" spellcheck="false" rows="6"></textarea>
+              <div class="sql-actions">
+                <button type="submit">运行查询</button>
+                <p class="hint">仅支持 SELECT / WITH / DESCRIBE / SHOW / EXPLAIN</p>
+              </div>
+            </form>
+            <p class="error" id="sql-error" hidden></p>
+            <div class="table-wrap">
+              <table>
+                <thead id="head-sql"></thead>
+                <tbody id="body-sql"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts?v=20261008-preview-style-v9"></script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.venv/
+*.duckdb
+*.duckdb.wal
+.DS_Store
