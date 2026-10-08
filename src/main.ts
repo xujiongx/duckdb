@@ -17,12 +17,16 @@ type Row = Record<string, unknown>;
 type FileKind = "csv" | "parquet" | "json" | "excel";
 
 const TABLE = "data";
-const BUILD_ID = "20261008-preview-style-v9";
+const BUILD_ID = "20261008-mobile-ready-v10";
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 let db: duckdb.AsyncDuckDB | null = null;
 let conn: duckdb.AsyncDuckDBConnection | null = null;
-let ready = false;
+/** 上传/预览/亚马逊分析：不依赖 Wasm，打开页面即可用 */
+let appReady = false;
+/** SQL 面板依赖 DuckDB-Wasm，手机上可能较慢或失败 */
+let duckdbReady = false;
+let duckdbInitError = "";
 let amazonMode = false;
 let activeAmazonId = AMAZON_ANALYSES[0]?.id ?? "";
 
@@ -621,57 +625,112 @@ async function runAmazonAnalysis(analysis: AmazonAnalysis): Promise<void> {
   }
 }
 
-async function initDuckDB(): Promise<void> {
-  const bundles: duckdb.DuckDBBundles = {
-    mvp: { mainModule: duckdbWasm, mainWorker: mvpWorker },
-    eh: { mainModule: duckdbWasmEh, mainWorker: ehWorker },
-  };
-
-  const bundle = await duckdb.selectBundle(bundles);
-  const worker = new Worker(bundle.mainWorker!);
-  db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
-  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-  conn = await db.connect();
-  ready = true;
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(`${label}超时（${Math.round(ms / 1000)}s），手机网络较慢时可先上传分析`));
+    }, ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        window.clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
-async function createTableFromReader(
-  kind: Exclude<FileKind, "excel">,
-  virtualName: string,
-  buffer: Uint8Array,
-): Promise<void> {
-  if (!db || !conn) throw new Error("DuckDB 尚未就绪");
-  await db.registerFileBuffer(virtualName, buffer);
+function isMobileBrowser(): boolean {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
+async function initDuckDB(): Promise<void> {
+  const mobile = isMobileBrowser();
+  setStatus(
+    mobile
+      ? "正在后台加载 DuckDB-Wasm（手机约需下载几十 MB，可先上传文件分析）…"
+      : "正在后台加载 DuckDB-Wasm…",
+  );
+
+  // 手机只走 MVP（更小、兼容更好）；桌面再尝试 EH
+  const localBundles: duckdb.DuckDBBundles = mobile
+    ? { mvp: { mainModule: duckdbWasm, mainWorker: mvpWorker } }
+    : {
+        mvp: { mainModule: duckdbWasm, mainWorker: mvpWorker },
+        eh: { mainModule: duckdbWasmEh, mainWorker: ehWorker },
+      };
+
+  const tryLocal = async (bundles: duckdb.DuckDBBundles) => {
+    const bundle = await duckdb.selectBundle(bundles);
+    const worker = new Worker(bundle.mainWorker!);
+    const instance = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+    await instance.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    return instance;
+  };
+
+  // CDN Worker 跨域需 Blob 包装（官方推荐写法）
+  const tryCdn = async () => {
+    const bundles = duckdb.getJsDelivrBundles();
+    const bundle = await duckdb.selectBundle(
+      mobile ? { mvp: bundles.mvp } : bundles,
+    );
+    const workerUrl = URL.createObjectURL(
+      new Blob([`importScripts("${bundle.mainWorker!}");`], {
+        type: "text/javascript",
+      }),
+    );
+    try {
+      const worker = new Worker(workerUrl);
+      const instance = new duckdb.AsyncDuckDB(
+        new duckdb.ConsoleLogger(),
+        worker,
+      );
+      await instance.instantiate(bundle.mainModule, bundle.pthreadWorker);
+      return instance;
+    } finally {
+      URL.revokeObjectURL(workerUrl);
+    }
+  };
+
+  try {
+    db = await withTimeout(tryLocal(localBundles), 90_000, "本地 Wasm 初始化");
+  } catch (localErr) {
+    console.warn("本地 Wasm 失败，尝试 CDN", localErr);
+    setStatus("本地引擎加载失败，改试 CDN…");
+    db = await withTimeout(tryCdn(), 120_000, "CDN Wasm 初始化");
+  }
+
+  conn = await db.connect();
+  duckdbReady = true;
+  duckdbInitError = "";
+}
+
+async function syncRowsToDuckDB(rows: Row[]): Promise<void> {
+  if (!duckdbReady || !db || !conn || !rows.length) return;
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const csv = XLSX.utils.sheet_to_csv(worksheet);
+  const virtualName = `sync_${Date.now()}.csv`;
+  await db.registerFileBuffer(virtualName, new TextEncoder().encode(csv));
   await conn.query(`
     CREATE OR REPLACE TABLE ${TABLE} AS
-    SELECT * FROM ${readerSql(kind, virtualName)}
+    SELECT * FROM read_csv_auto('${virtualName}', HEADER=true, SAMPLE_SIZE=-1)
   `);
 }
 
-async function createTableFromExcelSheet(
+function parseWorkbookSheet(
   workbook: XLSX.WorkBook,
   sheetName: string,
-): Promise<Row[]> {
-  if (!db || !conn) throw new Error("DuckDB 尚未就绪");
-
+): Row[] {
   const sheet = workbook.Sheets[sheetName];
   if (!sheet) throw new Error(`找不到工作表：${sheetName}`);
-
   const rows = XLSX.utils.sheet_to_json<Row>(sheet, {
     defval: null,
     raw: false,
   });
   if (!rows.length) throw new Error(`工作表「${sheetName}」没有数据`);
-
-  // 转成 CSV 再导入，供 SQL 面板使用；亚马逊分析用 rows 前端聚合
-  const csv = XLSX.utils.sheet_to_csv(sheet);
-  const virtualName = `excel_${Date.now()}.csv`;
-  const csvBytes = new TextEncoder().encode(csv);
-  await db.registerFileBuffer(virtualName, csvBytes);
-  await conn.query(`
-    CREATE OR REPLACE TABLE ${TABLE} AS
-    SELECT * FROM read_csv_auto('${virtualName}', HEADER=true, SAMPLE_SIZE=-1)
-  `);
   return rows;
 }
 
@@ -681,53 +740,51 @@ async function refreshWorkspace(
   formatLabel: string,
   metaExtra = "",
 ): Promise<void> {
-  const [overview] = await queryRows(
-    `SELECT COUNT(*)::INTEGER AS rows FROM ${TABLE}`,
-  );
-  const schema = await queryRows(`DESCRIBE ${TABLE}`);
-  const columns = schema.map((row) => String(row.column_name));
-
-  // 预览优先用本地全量缓存；没有缓存时再从 DuckDB 拉全量
-  if (cachedSourceRows.length) {
-    previewRows = cachedSourceRows;
-  } else {
-    previewRows = await queryRows(`SELECT * FROM ${TABLE}`);
+  if (!cachedSourceRows.length && duckdbReady) {
+    cachedSourceRows = await queryRows(`SELECT * FROM ${TABLE}`);
   }
+  if (!cachedSourceRows.length) {
+    throw new Error("没有可用数据，请重新上传文件");
+  }
+
+  previewRows = cachedSourceRows;
   previewColumns = columnsFromRows(previewRows);
   previewPage = 1;
+  const columns = previewColumns.map((col) => col.key);
+
+  // 有 DuckDB 时后台同步，供 SQL 面板使用；失败不影响预览/分析
+  if (duckdbReady) {
+    void syncRowsToDuckDB(cachedSourceRows).catch((err) => {
+      console.warn("同步到 DuckDB 失败", err);
+    });
+  }
 
   document.getElementById("file-name")!.textContent = fileName;
   document.getElementById("file-meta")!.textContent =
-    `${formatBytes(size)} · ${formatLabel}${metaExtra} · 已导入表 ${TABLE}`;
-  document.getElementById("stat-rows")!.textContent = Number(
-    overview.rows,
-  ).toLocaleString("zh-CN");
-  document.getElementById("stat-cols")!.textContent = String(
-    previewColumns.length || columns.length,
-  );
+    `${formatBytes(size)} · ${formatLabel}${metaExtra}` +
+    (duckdbReady ? ` · SQL 可用` : ` · SQL 待引擎就绪`);
+  document.getElementById("stat-rows")!.textContent =
+    previewRows.length.toLocaleString("zh-CN");
+  document.getElementById("stat-cols")!.textContent = String(previewColumns.length);
   document.getElementById("stat-table")!.textContent = TABLE;
   document.getElementById("stat-format")!.textContent = formatLabel;
 
   (document.getElementById("sql-input") as HTMLTextAreaElement).value =
-    defaultSql(previewColumns.map((col) => col.key));
+    defaultSql(columns);
 
   renderPreviewMount(true);
   renderTable(
     "head-schema",
     "body-schema",
-    schema.map((row) => ({
-      column_name: row.column_name,
-      column_type: row.column_type,
-      null: row.null,
+    previewColumns.map((col) => ({
+      column_name: col.key,
+      column_type: "VARCHAR",
+      null: "YES",
     })),
   );
   renderTable("head-sql", "body-sql", []);
 
-  const sourceColumns = previewColumns.length
-    ? previewColumns.map((col) => col.key)
-    : columns;
-  const isAmazon =
-    isAmazonSearchTermReport(sourceColumns) || isAmazonSearchTermReport(columns);
+  const isAmazon = isAmazonSearchTermReport(columns);
   setAmazonMode(isAmazon);
   renderAmazonCards();
 
@@ -738,7 +795,7 @@ async function refreshWorkspace(
     document.getElementById("amazon-result-desc")!.textContent =
       "请选择上方分析模块";
     switchView("amazon");
-    setStatus(`已加载亚马逊搜索词报告（${BUILD_ID}），正在生成搜索词汇总…`);
+    setStatus(`已加载亚马逊搜索词报告，正在生成搜索词汇总…`);
     await runAmazonAnalysis(AMAZON_ANALYSES[0]);
   } else {
     switchView("preview");
@@ -753,10 +810,7 @@ async function loadBuffer(
   buffer: Uint8Array,
   size: number,
 ): Promise<void> {
-  if (!db || !conn) throw new Error("DuckDB 尚未就绪");
-
   const kind = detectKind(fileName);
-  const virtualName = `upload_${Date.now()}_${fileName.replace(/[^\w.-]+/g, "_")}`;
 
   if (kind === "excel") {
     const workbook = XLSX.read(buffer, {
@@ -765,7 +819,6 @@ async function loadBuffer(
     });
     if (!workbook.SheetNames.length) throw new Error("Excel 文件中没有工作表");
 
-    // 优先选有数据的工作表
     const preferred =
       workbook.SheetNames.find((name) => {
         const rows = XLSX.utils.sheet_to_json(workbook.Sheets[name], {
@@ -776,7 +829,7 @@ async function loadBuffer(
 
     excelState = { fileName, size, workbook, sheetName: preferred };
     updateSheetPicker(workbook.SheetNames, preferred);
-    cachedSourceRows = await createTableFromExcelSheet(workbook, preferred);
+    cachedSourceRows = parseWorkbookSheet(workbook, preferred);
     await refreshWorkspace(
       fileName,
       size,
@@ -789,19 +842,25 @@ async function loadBuffer(
   excelState = null;
   updateSheetPicker([], "");
 
-  // CSV/文本也用 SheetJS 解析一份原始行，供亚马逊分析使用
   if (kind === "csv" || kind === "json") {
     const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
     const sheetName = workbook.SheetNames[0];
-    cachedSourceRows = XLSX.utils.sheet_to_json<Row>(workbook.Sheets[sheetName], {
-      defval: null,
-      raw: false,
-    });
+    cachedSourceRows = parseWorkbookSheet(workbook, sheetName);
+  } else if (kind === "parquet") {
+    if (!duckdbReady) {
+      throw new Error("Parquet 需要 DuckDB 引擎，请等待引擎加载完成后再试");
+    }
+    const virtualName = `upload_${Date.now()}_${fileName.replace(/[^\w.-]+/g, "_")}`;
+    await db!.registerFileBuffer(virtualName, buffer);
+    await conn!.query(`
+      CREATE OR REPLACE TABLE ${TABLE} AS
+      SELECT * FROM ${readerSql(kind, virtualName)}
+    `);
+    cachedSourceRows = await queryRows(`SELECT * FROM ${TABLE}`);
   } else {
     cachedSourceRows = [];
   }
 
-  await createTableFromReader(kind, virtualName, buffer);
   await refreshWorkspace(fileName, size, kind.toUpperCase());
 }
 
@@ -810,10 +869,7 @@ async function switchExcelSheet(sheetName: string): Promise<void> {
   setStatus(`正在切换到工作表「${sheetName}」…`);
   try {
     excelState.sheetName = sheetName;
-    cachedSourceRows = await createTableFromExcelSheet(
-      excelState.workbook,
-      sheetName,
-    );
+    cachedSourceRows = parseWorkbookSheet(excelState.workbook, sheetName);
     updateSheetPicker(excelState.workbook.SheetNames, sheetName);
     await refreshWorkspace(
       excelState.fileName,
@@ -828,8 +884,8 @@ async function switchExcelSheet(sheetName: string): Promise<void> {
 }
 
 async function handleFile(file: File): Promise<void> {
-  if (!ready) {
-    setStatus("DuckDB 还在初始化，请稍候再上传", true);
+  if (!appReady) {
+    setStatus("页面还在准备，请稍候再上传", true);
     return;
   }
 
@@ -845,8 +901,8 @@ async function handleFile(file: File): Promise<void> {
 }
 
 async function loadSampleFile(url: string, fileName: string, tip: string): Promise<void> {
-  if (!ready) {
-    setStatus("DuckDB 还在初始化，请稍候", true);
+  if (!appReady) {
+    setStatus("页面还在准备，请稍候", true);
     return;
   }
 
@@ -867,6 +923,14 @@ async function runSql(event: Event): Promise<void> {
   const errorEl = document.getElementById("sql-error")!;
   errorEl.hidden = true;
 
+  if (!duckdbReady) {
+    errorEl.hidden = false;
+    errorEl.textContent = duckdbInitError
+      ? `DuckDB 未就绪：${duckdbInitError}`
+      : "DuckDB 仍在后台加载，请稍后再试 SQL；预览和亚马逊分析可先用";
+    return;
+  }
+
   const sql = (document.getElementById("sql-input") as HTMLTextAreaElement)
     .value.trim();
 
@@ -878,6 +942,9 @@ async function runSql(event: Event): Promise<void> {
   }
 
   try {
+    if (cachedSourceRows.length) {
+      await syncRowsToDuckDB(cachedSourceRows);
+    }
     const rows = await queryRows(sql);
     renderTable("head-sql", "body-sql", rows);
   } catch (err) {
@@ -967,12 +1034,27 @@ async function main(): Promise<void> {
   setAmazonMode(false);
   document.body.dataset.build = BUILD_ID;
 
+  // 立刻允许上传：预览/亚马逊分析不依赖 Wasm
+  appReady = true;
+  setStatus(
+    isMobileBrowser()
+      ? "可直接上传分析（DuckDB 在后台加载，手机可能较慢）"
+      : "可直接上传分析；DuckDB 正在后台加载（SQL 面板需要）",
+  );
+
   try {
     await initDuckDB();
-    setStatus(`引擎已就绪（${BUILD_ID}）。请点「试用亚马逊搜索词报告」或上传 Excel`);
+    setStatus(
+      `全部就绪。可上传 Excel / 试用亚马逊报告；SQL 面板已可用（${BUILD_ID}）`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    setStatus(`初始化失败：${message}`, true);
+    duckdbInitError = message;
+    duckdbReady = false;
+    setStatus(
+      `上传/预览/亚马逊分析可用；DuckDB(SQL) 加载失败：${message}`,
+      true,
+    );
     console.error(err);
   }
 }

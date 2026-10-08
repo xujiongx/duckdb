@@ -6,10 +6,10 @@
   "type": "module",
   "scripts": {
     "prestart": "echo '\\n>>> 请打开终端提示的 Local 地址，并强制刷新 Cmd+Shift+R\\n'",
-    "dev": "vite --port 5173 --strictPort --force",
-    "start": "vite --port 5173 --strictPort --force",
+    "dev": "vite --port 5173 --strictPort --host --force",
+    "start": "vite --port 5173 --strictPort --host --force",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5173 --host"
   },
   "keywords": [
     "duckdb",
