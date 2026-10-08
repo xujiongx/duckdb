@@ -13,12 +13,17 @@ import {
 } from "./amazonAnalyses";
 import { computeAmazonAnalysis } from "./amazonCompute";
 import { generateSqlFromPrompt, isAiConfigured } from "./aiSql";
+import {
+  coerceRowsForDuckDB,
+  inferColumnMetas,
+  typedCreateTableSql,
+} from "./columnTypes";
 
 type Row = Record<string, unknown>;
 type FileKind = "csv" | "parquet" | "json" | "excel";
 
 const TABLE = "data";
-const BUILD_ID = "20261008-ai-sql-v11";
+const BUILD_ID = "20261008-ai-sql-types-v12";
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 let db: duckdb.AsyncDuckDB | null = null;
@@ -711,14 +716,14 @@ async function initDuckDB(): Promise<void> {
 
 async function syncRowsToDuckDB(rows: Row[]): Promise<void> {
   if (!duckdbReady || !db || !conn || !rows.length) return;
-  const worksheet = XLSX.utils.json_to_sheet(rows);
+  // Excel/SheetJS 常把数字读成文本；规整后再按类型 CAST，避免 SUM(VARCHAR)
+  const coerced = coerceRowsForDuckDB(rows);
+  const metas = inferColumnMetas(coerced);
+  const worksheet = XLSX.utils.json_to_sheet(coerced);
   const csv = XLSX.utils.sheet_to_csv(worksheet);
   const virtualName = `sync_${Date.now()}.csv`;
   await db.registerFileBuffer(virtualName, new TextEncoder().encode(csv));
-  await conn.query(`
-    CREATE OR REPLACE TABLE ${TABLE} AS
-    SELECT * FROM read_csv_auto('${virtualName}', HEADER=true, SAMPLE_SIZE=-1)
-  `);
+  await conn.query(typedCreateTableSql(TABLE, virtualName, metas));
 }
 
 function parseWorkbookSheet(
@@ -753,6 +758,8 @@ async function refreshWorkspace(
   previewPage = 1;
   const columns = previewColumns.map((col) => col.key);
 
+  const columnMetas = inferColumnMetas(cachedSourceRows);
+
   // 有 DuckDB 时后台同步，供 SQL 面板使用；失败不影响预览/分析
   if (duckdbReady) {
     void syncRowsToDuckDB(cachedSourceRows).catch((err) => {
@@ -777,9 +784,9 @@ async function refreshWorkspace(
   renderTable(
     "head-schema",
     "body-schema",
-    previewColumns.map((col) => ({
-      column_name: col.key,
-      column_type: "VARCHAR",
+    columnMetas.map((col) => ({
+      column_name: col.name,
+      column_type: col.sqlType,
       null: "YES",
     })),
   );
@@ -933,9 +940,11 @@ async function generateAiSql(): Promise<void> {
     return;
   }
 
-  const columns = previewColumns.length
-    ? previewColumns.map((col) => col.key)
-    : columnsFromRows(cachedSourceRows).map((col) => col.key);
+  if (!cachedSourceRows.length) {
+    errorEl.hidden = false;
+    errorEl.textContent = "请先上传数据";
+    return;
+  }
 
   btn.disabled = true;
   const prevLabel = btn.textContent;
@@ -943,10 +952,15 @@ async function generateAiSql(): Promise<void> {
   setStatus("正在调用 AI 生成 SQL…");
 
   try {
+    // 生成前确保表类型已规整（点击量/花费等为数值）
+    if (duckdbReady) {
+      await syncRowsToDuckDB(cachedSourceRows);
+    }
+    const columns = inferColumnMetas(cachedSourceRows);
     const sql = await generateSqlFromPrompt(promptEl.value, {
       tableName: TABLE,
       columns,
-      sampleRows: cachedSourceRows.slice(0, 3),
+      sampleRows: coerceRowsForDuckDB(cachedSourceRows.slice(0, 3)),
     });
     sqlEl.value = sql;
     setStatus("SQL 已生成，可编辑后点击「运行查询」");

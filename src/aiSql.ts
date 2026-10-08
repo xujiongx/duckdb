@@ -1,8 +1,10 @@
 /** 调用 Agnes OpenAI 兼容接口：自然语言 → DuckDB SQL */
 
+import type { ColumnMeta } from "./columnTypes";
+
 export type AiSqlSchema = {
   tableName: string;
-  columns: string[];
+  columns: ColumnMeta[];
   sampleRows?: Record<string, unknown>[];
 };
 
@@ -31,23 +33,32 @@ export function isAiConfigured(): boolean {
 
 function buildSystemPrompt(schema: AiSqlSchema): string {
   const cols = schema.columns.length
-    ? schema.columns.map((c) => `- ${c}`).join("\n")
+    ? schema.columns
+        .map((c) => `- "${c.name}" (${c.sqlType}) — ${c.hint}`)
+        .join("\n")
     : "- （列未知）";
   const sample =
     schema.sampleRows && schema.sampleRows.length
       ? `\n样例行（JSON，仅供理解数据形态）：\n${JSON.stringify(schema.sampleRows.slice(0, 3), null, 2)}`
       : "";
 
-  return `你是 DuckDB SQL 助手。根据用户的中文/英文描述，生成一条可在 DuckDB 中运行的只读 SQL。
+  return `你是 DuckDB SQL 助手。根据用户描述，生成一条可在 DuckDB 中运行的只读 SQL。
 
 硬性规则：
-1. 只能查询表 \`${schema.tableName}\`，不要编造其他表。
-2. 只输出 SELECT / WITH / DESCRIBE / SHOW / EXPLAIN 语句；禁止 INSERT/UPDATE/DELETE/CREATE/DROP/COPY/ATTACH 等写操作。
-3. 列名必须来自下列字段（注意大小写与空格，必要时用双引号包裹）：
+1. 只能查询表 \`${schema.tableName}\`，不要编造其他表或其他列名。
+2. 只输出 SELECT / WITH / DESCRIBE / SHOW / EXPLAIN；禁止写操作。
+3. 列名必须原样使用（含中文），一律用双引号包裹，例如 "客户搜索词"。
+4. 聚合规则（非常重要）：
+   - 类型为 BIGINT/DOUBLE 的列：可直接 SUM/AVG/ORDER BY。
+   - 类型为 VARCHAR 的列：禁止直接 SUM/AVG；若内容像数字，必须写 SUM(TRY_CAST("列名" AS DOUBLE))。
+   - 类型为 DATE 或日期文本：不要假设已是 DATE，可用 TRY_CAST 或按字符串分组。
+5. 用户说「关键词」时优先用 "客户搜索词"；「点击」用 "点击量"；「花费」用 "花费"；「订单」用 "7天总订单数(#)"（若该列存在）。
+6. 默认 LIMIT 100；若要求 Top N 则用 ORDER BY + LIMIT N。
+7. 只输出 SQL 本身，不要 markdown，不要解释。
+8. 不要使用图表/横轴等前端概念；只返回查询结果所需的列。
+
+表字段：
 ${cols}
-4. 只输出 SQL 本身，不要 markdown 代码块，不要解释。
-5. 默认 LIMIT 100，除非用户明确要求全量或汇总。
-6. 日期/数字按 DuckDB 语法处理；中文列名用双引号。
 ${sample}`;
 }
 
