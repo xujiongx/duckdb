@@ -12,12 +12,13 @@ import {
   type AmazonColumn,
 } from "./amazonAnalyses";
 import { computeAmazonAnalysis } from "./amazonCompute";
+import { generateSqlFromPrompt, isAiConfigured } from "./aiSql";
 
 type Row = Record<string, unknown>;
 type FileKind = "csv" | "parquet" | "json" | "excel";
 
 const TABLE = "data";
-const BUILD_ID = "20261008-mobile-ready-v10";
+const BUILD_ID = "20261008-ai-sql-v11";
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 let db: duckdb.AsyncDuckDB | null = null;
@@ -918,6 +919,48 @@ async function loadSampleFile(url: string, fileName: string, tip: string): Promi
   }
 }
 
+async function generateAiSql(): Promise<void> {
+  const errorEl = document.getElementById("sql-error")!;
+  const btn = document.getElementById("ai-generate-btn") as HTMLButtonElement;
+  const promptEl = document.getElementById("ai-prompt") as HTMLTextAreaElement;
+  const sqlEl = document.getElementById("sql-input") as HTMLTextAreaElement;
+  errorEl.hidden = true;
+
+  if (!isAiConfigured()) {
+    errorEl.hidden = false;
+    errorEl.textContent =
+      "未配置 AI：请在项目根目录 .env 填写 OPENAI_API_KEY / AGNES_API_BASE，并重启开发服务";
+    return;
+  }
+
+  const columns = previewColumns.length
+    ? previewColumns.map((col) => col.key)
+    : columnsFromRows(cachedSourceRows).map((col) => col.key);
+
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = "生成中…";
+  setStatus("正在调用 AI 生成 SQL…");
+
+  try {
+    const sql = await generateSqlFromPrompt(promptEl.value, {
+      tableName: TABLE,
+      columns,
+      sampleRows: cachedSourceRows.slice(0, 3),
+    });
+    sqlEl.value = sql;
+    setStatus("SQL 已生成，可编辑后点击「运行查询」");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    errorEl.hidden = false;
+    errorEl.textContent = message;
+    setStatus(`AI 生成失败：${message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel ?? "AI 生成 SQL";
+  }
+}
+
 async function runSql(event: Event): Promise<void> {
   event.preventDefault();
   const errorEl = document.getElementById("sql-error")!;
@@ -947,6 +990,7 @@ async function runSql(event: Event): Promise<void> {
     }
     const rows = await queryRows(sql);
     renderTable("head-sql", "body-sql", rows);
+    setStatus(`查询完成，返回 ${rows.length.toLocaleString("zh-CN")} 行`);
   } catch (err) {
     errorEl.hidden = false;
     errorEl.textContent = err instanceof Error ? err.message : String(err);
@@ -1024,6 +1068,16 @@ function bindUi(): void {
   document.getElementById("sql-form")!.addEventListener("submit", (event) => {
     void runSql(event);
   });
+  document.getElementById("ai-generate-btn")!.addEventListener("click", () => {
+    void generateAiSql();
+  });
+
+  const aiHint = document.getElementById("ai-hint");
+  if (aiHint) {
+    aiHint.textContent = isAiConfigured()
+      ? "生成后可再编辑，再点「运行查询」"
+      : "未检测到 OPENAI_API_KEY（检查 .env 并重启服务）";
+  }
 
   renderAmazonCards();
 }

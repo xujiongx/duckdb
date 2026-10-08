@@ -575,15 +575,50 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+.ai-sql-panel,
 .sql-form {
   display: grid;
   gap: 10px;
   margin-bottom: 16px;
 }
 
+.ai-sql-panel {
+  padding-bottom: 16px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.ai-sql-panel label,
 .sql-form label {
   font-weight: 600;
   color: var(--accent-deep);
+}
+
+#ai-generate-btn {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 20px;
+  background: linear-gradient(180deg, #2a7a9b, #1f5f7a);
+  color: white;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 0 #163f52;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+#ai-generate-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+#ai-generate-btn:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: 0 4px 0 #163f52;
+}
+
+#ai-generate-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 textarea {

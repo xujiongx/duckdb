@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .venv/
+.env
+.env.*
+!.env.example
 *.duckdb
 *.duckdb.wal
 .DS_Store

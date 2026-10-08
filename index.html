@@ -121,6 +121,18 @@
           </div>
 
           <div class="view" id="view-sql">
+            <div class="ai-sql-panel">
+              <label for="ai-prompt">用自然语言描述分析需求</label>
+              <textarea
+                id="ai-prompt"
+                rows="3"
+                placeholder="例如：按日期汇总花费和订单，并计算 CPC、CVR"
+              ></textarea>
+              <div class="sql-actions">
+                <button type="button" id="ai-generate-btn">AI 生成 SQL</button>
+                <p class="hint" id="ai-hint">生成后可再编辑，再点「运行查询」</p>
+              </div>
+            </div>
             <form class="sql-form" id="sql-form">
               <label for="sql-input">对表 <code>data</code> 编写只读 SQL</label>
               <textarea id="sql-input" spellcheck="false" rows="6"></textarea>
@@ -140,6 +152,6 @@
         </section>
       </section>
     </main>
-    <script type="module" src="/src/main.ts?v=20261008-mobile-ready-v10"></script>
+    <script type="module" src="/src/main.ts?v=20261008-ai-sql-v11"></script>
   </body>
 </html>
